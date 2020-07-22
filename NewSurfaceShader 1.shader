@@ -6,8 +6,6 @@
 		_Metallic ("Metallic", Range(0,1)) = 0.0
 		_MaxIterations ("Max Iterations", Int) = 64
 		_Epsilon ("Epsilon", Float) = 0.0001
-		[Toggle(_GENERATE_NORMALS)] _GenerateNormalsToggle ("Generate Custom Normals", Float) = 1
-		[Toggle(_GENERATE_ALPHA)] _DebugToggle ("Generate Alpha", Float) = 1
 		[Toggle(_RENDER_DEBUGINFO)] _DebugToggle ("View Debug", Float) = 1
 	}
 	SubShader {
@@ -21,12 +19,11 @@
 
 		#include "util/map_range.cginc"
 		#include "util/glsl_style_modulo.cginc"
+		#include "util/sdf.cginc"
 
 		#include "UnityPBSLighting.cginc"
 
-		#pragma shader_feature _RENDER_DEBUGINFO
-		#pragma shader_feature _GENERATE_NORMALS
-		#pragma shader_feature _GENERATE_ALPHA
+		#pragma shader_feature_local _RENDER_DEBUGINFO
 
 		#pragma surface surf Foo fullforwardshadows alpha:blend vertex:vert finalcolor:finalColor
 
@@ -57,6 +54,7 @@
 
 		// modified version of SurfaceOutputStandard from UnityPBSLighting.cginc
 		struct SurfaceOutputFoo {
+			// ==== stuff that was already there ====
 			fixed3 Albedo;      // base (diffuse or specular) color
 			float3 Normal;      // tangent space normal, if written
 			half3 Emission;
@@ -66,10 +64,19 @@
 			half Smoothness;    // 0=rough, 1=smooth
 			half Occlusion;     // occlusion (default 1)
 			fixed Alpha;        // alpha for transparencies
+			
+			// ==== stuff I added ====
+			float3 WorldSpaceNormal;
 		};
 
 		float worldSDF(float3 p) {
-			return length(p) - .2;
+			// ==== smooth union demo ====
+			// float d1 = sphereSDF(translateSpace(p, float3(0,.5,0)), .5);
+			// float d2 = sphereSDF(translateSpace(p, float3(0,-.5,0)), .5);
+			// return opSmoothUnion(d1, d2, map(_SinTime.w, -1, 1, 0, 1));
+
+			// ==== tile space demo ====
+			return sphereSDF(repeatSpace(p, 1), .25);
 		}
 
 		// https://iquilezles.org/www/articles/normalsSDF/normalsSDF.htm
@@ -106,7 +113,7 @@
 			o.normal = v.normal;
 		}
 
-		void surf(Input IN, inout SurfaceOutputStandard o) {
+		void surf(Input IN, inout SurfaceOutputFoo o) {
 			float3 debug = float3(0,0,0);
 
 			// setup material stuff
@@ -117,9 +124,9 @@
 
 			SphereTraceResult result = sphereTrace(IN.worldPos, normalize(IN.worldPos - _WorldSpaceCameraPos));
 			
-			#ifdef _GENERATE_NORMALS
-				o.Normal = float3(0,0,1);
-			#endif
+			// if I assign to o.Normal here unity assumes it's in tangent space so I use this variable instead
+			o.WorldSpaceNormal = result.collisionNormal;
+			o.Alpha = result.collisionOccurred;
 			
 			#ifdef _RENDER_DEBUGINFO
 				o.Emission = debug;
@@ -127,10 +134,8 @@
 		}
 
 		// modified version of LightingStandard from UnityPBSLighting.cginc
-		half4 LightingFoo (SurfaceOutputStandard s, float3 viewDir, UnityGI gi) {
-			s.Normal = normalize(s.Normal);
-			return half4(s.Normal,1);
-
+		half4 LightingFoo (SurfaceOutputFoo s, float3 viewDir, UnityGI gi) {
+			s.Normal = normalize(s.WorldSpaceNormal);
 			half oneMinusReflectivity;
 			half3 specColor;
 			s.Albedo = DiffuseAndSpecularFromMetallic (s.Albedo, s.Metallic, /*out*/ specColor, /*out*/ oneMinusReflectivity);
@@ -142,11 +147,11 @@
 
 			half4 c = UNITY_BRDF_PBS (s.Albedo, specColor, oneMinusReflectivity, s.Smoothness, s.Normal, viewDir, gi.light, gi.indirect);
 			c.a = outputAlpha;
-			// return c;
+			return c;
 		}
 
 		// modified version of LightingStandard_GI from UnityPBSLighting.cginc
-		inline void LightingFoo_GI (SurfaceOutputStandard s, UnityGIInput data, inout UnityGI gi) {
+		inline void LightingFoo_GI (SurfaceOutputFoo s, UnityGIInput data, inout UnityGI gi) {
 			#if defined(UNITY_PASS_DEFERRED) && UNITY_ENABLE_REFLECTION_BUFFERS
 				gi = UnityGlobalIllumination(data, s.Occlusion, s.Normal);
 			#else
@@ -155,7 +160,7 @@
 			#endif
 		}
 
-		void finalColor(Input IN, SurfaceOutputStandard o, inout fixed4 color) {
+		void finalColor(Input IN, SurfaceOutputFoo o, inout fixed4 color) {
 			#ifdef _RENDER_DEBUGINFO
 				color.rgb = o.Emission;
 				color.a = 1;
