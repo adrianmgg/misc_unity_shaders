@@ -93,8 +93,9 @@
 		SphereTraceResult sphereTrace(float3 initialRayPosition, float3 rayDirection) {
 			SphereTraceResult ret;
 			float3 rayPosition = initialRayPosition;
+			float insideFlip = sign(worldSDF(initialRayPosition));
 			for(ret.iterations = 0; ret.iterations < _MaxIterations; ret.iterations++) {
-				float d = worldSDF(rayPosition);
+				float d = worldSDF(rayPosition) * insideFlip;
 				if(d < _Epsilon) {
 					ret.collisionOccurred = true;
 					ret.collisionPosition = rayPosition;
