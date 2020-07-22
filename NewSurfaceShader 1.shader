@@ -1,17 +1,13 @@
-﻿// Upgrade NOTE: commented out 'float3 _WorldSpaceCameraPos', a built-in variable
-
-// Upgrade NOTE: commented out 'float3 _WorldSpaceCameraPos', a built-in variable
-
-// Upgrade NOTE: commented out 'float3 _WorldSpaceCameraPos', a built-in variable
-
-Shader "Custom/NewSurfaceShader 1" {
+﻿Shader "Custom/NewSurfaceShader 1" {
 	Properties {
 		_Color ("Color", Color) = (1,1,1,1)
 		_MainTex ("Albedo (RGB)", 2D) = "white" {}
 		_Glossiness ("Smoothness", Range(0,1)) = 0.5
 		_Metallic ("Metallic", Range(0,1)) = 0.0
 		_MaxIterations ("Max Iterations", Int) = 64
+		_Epsilon ("Epsilon", Float) = 0.0001
 		[Toggle(_GENERATE_NORMALS)] _GenerateNormalsToggle ("Generate Custom Normals", Float) = 1
+		[Toggle(_GENERATE_ALPHA)] _DebugToggle ("Generate Alpha", Float) = 1
 		[Toggle(_RENDER_DEBUGINFO)] _DebugToggle ("View Debug", Float) = 1
 	}
 	SubShader {
@@ -26,10 +22,13 @@ Shader "Custom/NewSurfaceShader 1" {
 		#include "util/map_range.cginc"
 		#include "util/glsl_style_modulo.cginc"
 
+		#include "UnityPBSLighting.cginc"
+
 		#pragma shader_feature _RENDER_DEBUGINFO
 		#pragma shader_feature _GENERATE_NORMALS
+		#pragma shader_feature _GENERATE_ALPHA
 
-		#pragma surface surf Standard fullforwardshadows alpha:blend vertex:vert finalcolor:finalColor
+		#pragma surface surf Foo fullforwardshadows alpha:blend vertex:vert finalcolor:finalColor
 
 		// Use shader model 3.0 target, to get nicer looking lighting
 		#pragma target 3.0
@@ -38,13 +37,16 @@ Shader "Custom/NewSurfaceShader 1" {
 
 		struct Input {
 			float3 worldPos;
+			float3 objectPos;
 			float4 tangent;
+			float3 normal;
 		};
 
 		half _Glossiness;
 		half _Metallic;
 		fixed4 _Color;
 		int _MaxIterations;
+		float _Epsilon;
 
 		struct SphereTraceResult {
 			int iterations;
@@ -53,8 +55,32 @@ Shader "Custom/NewSurfaceShader 1" {
 			float3 collisionPosition;
 		};
 
+		// modified version of SurfaceOutputStandard from UnityPBSLighting.cginc
+		struct SurfaceOutputFoo {
+			fixed3 Albedo;      // base (diffuse or specular) color
+			float3 Normal;      // tangent space normal, if written
+			half3 Emission;
+			half Metallic;      // 0=non-metal, 1=metal
+			// Smoothness is the user facing name, it should be perceptual smoothness but user should not have to deal with it.
+			// Everywhere in the code you meet smoothness it is perceptual smoothness
+			half Smoothness;    // 0=rough, 1=smooth
+			half Occlusion;     // occlusion (default 1)
+			fixed Alpha;        // alpha for transparencies
+		};
+
 		float worldSDF(float3 p) {
 			return length(p) - .2;
+		}
+
+		// https://iquilezles.org/www/articles/normalsSDF/normalsSDF.htm
+		float3 calculateSDFNormal(float3 p) {
+			const float2 k = float2(1,-1);
+			return normalize(
+				k.xyy * worldSDF(p + k.xyy*_Epsilon)
+				+ k.yyx * worldSDF(p + k.yyx*_Epsilon)
+				+ k.yxy * worldSDF(p + k.yxy*_Epsilon)
+				+ k.xxx * worldSDF(p + k.xxx*_Epsilon)
+			);
 		}
 		
 		SphereTraceResult sphereTrace(float3 initialRayPosition, float3 rayDirection) {
@@ -62,10 +88,10 @@ Shader "Custom/NewSurfaceShader 1" {
 			float3 rayPosition = initialRayPosition;
 			for(ret.iterations = 0; ret.iterations < _MaxIterations; ret.iterations++) {
 				float d = worldSDF(rayPosition);
-				if(d < 1e-4) {
+				if(d < _Epsilon) {
 					ret.collisionOccurred = true;
 					ret.collisionPosition = rayPosition;
-					// TODO collision normal
+					ret.collisionNormal = calculateSDFNormal(rayPosition);
 					return ret;
 				}
 				rayPosition += rayDirection * d;
@@ -75,8 +101,9 @@ Shader "Custom/NewSurfaceShader 1" {
 
 		void vert(inout appdata_full v, out Input o) {
 			UNITY_INITIALIZE_OUTPUT(Input, o);
-			// o.worldPos = mul(unity_ObjectToWorld, v.vertex);
+			o.objectPos = v.vertex;
 			o.tangent = v.tangent;
+			o.normal = v.normal;
 		}
 
 		void surf(Input IN, inout SurfaceOutputStandard o) {
@@ -88,16 +115,43 @@ Shader "Custom/NewSurfaceShader 1" {
 			o.Smoothness = _Glossiness;
 			o.Alpha = _Color.a;
 
+			SphereTraceResult result = sphereTrace(IN.worldPos, normalize(IN.worldPos - _WorldSpaceCameraPos));
+			
 			#ifdef _GENERATE_NORMALS
 				o.Normal = float3(0,0,1);
 			#endif
-
-			SphereTraceResult result = sphereTrace(IN.worldPos, normalize(IN.worldPos - _WorldSpaceCameraPos));
-			// debug = result.iterations / float(_MaxIterations);
-			debug = IN.tangent.xyz;
-
+			
 			#ifdef _RENDER_DEBUGINFO
 				o.Emission = debug;
+			#endif
+		}
+
+		// modified version of LightingStandard from UnityPBSLighting.cginc
+		half4 LightingFoo (SurfaceOutputStandard s, float3 viewDir, UnityGI gi) {
+			s.Normal = normalize(s.Normal);
+			return half4(s.Normal,1);
+
+			half oneMinusReflectivity;
+			half3 specColor;
+			s.Albedo = DiffuseAndSpecularFromMetallic (s.Albedo, s.Metallic, /*out*/ specColor, /*out*/ oneMinusReflectivity);
+
+			// shader relies on pre-multiply alpha-blend (_SrcBlend = One, _DstBlend = OneMinusSrcAlpha)
+			// this is necessary to handle transparency in physically correct way - only diffuse component gets affected by alpha
+			half outputAlpha;
+			s.Albedo = PreMultiplyAlpha (s.Albedo, s.Alpha, oneMinusReflectivity, /*out*/ outputAlpha);
+
+			half4 c = UNITY_BRDF_PBS (s.Albedo, specColor, oneMinusReflectivity, s.Smoothness, s.Normal, viewDir, gi.light, gi.indirect);
+			c.a = outputAlpha;
+			// return c;
+		}
+
+		// modified version of LightingStandard_GI from UnityPBSLighting.cginc
+		inline void LightingFoo_GI (SurfaceOutputStandard s, UnityGIInput data, inout UnityGI gi) {
+			#if defined(UNITY_PASS_DEFERRED) && UNITY_ENABLE_REFLECTION_BUFFERS
+				gi = UnityGlobalIllumination(data, s.Occlusion, s.Normal);
+			#else
+				Unity_GlossyEnvironmentData g = UnityGlossyEnvironmentSetup(s.Smoothness, data.worldViewDir, s.Normal, lerp(unity_ColorSpaceDielectricSpec.rgb, s.Albedo, s.Metallic));
+				gi = UnityGlobalIllumination(data, s.Occlusion, s.Normal, g);
 			#endif
 		}
 
