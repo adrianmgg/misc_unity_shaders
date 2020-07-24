@@ -1,4 +1,4 @@
-﻿Shader "Custom/NewSurfaceShader 1" {
+﻿Shader "Custom/SphereTracingWithCustomNormals" {
 	Properties {
 		_Color ("Color", Color) = (1,1,1,1)
 		_MainTex ("Albedo (RGB)", 2D) = "white" {}
@@ -7,6 +7,7 @@
 		_MaxIterations ("Max Iterations", Int) = 64
 		_Epsilon ("Epsilon", Float) = 0.0001
 		[Toggle(_RENDER_DEBUGINFO)] _DebugToggle ("View Debug", Float) = 1
+		[KeywordEnum(Camera, Surface)] _TraceStartAt ("Start Trace At", Float) = 0
 	}
 	SubShader {
 		Tags {
@@ -24,6 +25,7 @@
 		#include "UnityPBSLighting.cginc"
 
 		#pragma shader_feature_local _RENDER_DEBUGINFO
+		#pragma multi_compile_local _TRACESTARTAT_CAMERA _TRACESTARTAT_SURFACE
 
 		#pragma surface surf Foo fullforwardshadows alpha:blend vertex:vert finalcolor:finalColor
 
@@ -71,12 +73,18 @@
 
 		float worldSDF(float3 p) {
 			// ==== smooth union demo ====
-			// float d1 = sphereSDF(translateSpace(p, float3(0,.5,0)), .5);
-			// float d2 = sphereSDF(translateSpace(p, float3(0,-.5,0)), .5);
-			// return opSmoothUnion(d1, d2, map(_SinTime.w, -1, 1, 0, 1));
+			return opSmoothUnion(
+				sphereSDF(translateSpace(p, float3(0,.25,0)), .25),
+				sphereSDF(translateSpace(p, float3(0,-.25,0)), .25),
+				map(_SinTime.w, -1, 1, 0, .25)
+			);
 
 			// ==== tile space demo ====
-			return sphereSDF(repeatSpace(p, 1), .25);
+			// return sphereSDF(repeatSpace(p, 1), .25);
+
+			// ==== ====
+			// return mandelbulbSDF(p, map(_SinTime.y, -1, 1, 4, 8), 32);
+			// return mandelbulbSDF(p*4, map(_SinTime.y, -1, 1, 4, 8), 8)/4;
 		}
 
 		// https://iquilezles.org/www/articles/normalsSDF/normalsSDF.htm
@@ -123,7 +131,16 @@
 			o.Smoothness = _Glossiness;
 			o.Alpha = _Color.a;
 
-			SphereTraceResult result = sphereTrace(IN.worldPos, normalize(IN.worldPos - _WorldSpaceCameraPos));
+			SphereTraceResult result = sphereTrace(
+				#if defined (_TRACESTARTAT_CAMERA)
+					_WorldSpaceCameraPos,
+				#elif defined(_TRACESTARTAT_SURFACE)
+					IN.worldPos,
+				#else
+					"https://xkcd.com/2200/"
+				#endif
+				normalize(IN.worldPos - _WorldSpaceCameraPos)
+			);
 			
 			// if I assign to o.Normal here unity assumes it's in tangent space so I use this variable instead
 			o.WorldSpaceNormal = result.collisionNormal;
